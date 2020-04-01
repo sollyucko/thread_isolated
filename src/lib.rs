@@ -14,13 +14,12 @@
 //!
 //! For an example of ThreadIsolated in pure Rust code, see the `test_normal_use` function in the
 //! `test` module of `src/lib.rs`.
-#![feature(fnbox)]
 #![cfg_attr(test, feature(mpsc_select))]
 
-use std::boxed::FnBox;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::mem;
+use std::ops::FnOnce;
 use std::process;
 use std::sync::{Arc, Weak};
 use std::sync::mpsc::sync_channel;
@@ -31,7 +30,7 @@ pub use std::cell::{Ref, RefMut};
 
 /// A type that can run a given boxed closure on a particular thread.
 pub trait IsolationRunner: Sync + 'static {
-    fn run_on_owning_thread(&self, f: Box<FnBox() + Send>);
+    fn run_on_owning_thread(&self, f: Box<FnOnce() + Send>);
 }
 
 /// Phantom type indicating a `ThreadIsolated` on its owning thread.
@@ -145,22 +144,22 @@ impl<T> ThreadIsolated<T, NonOwningThread> {
 
         let (tx, rx) = sync_channel(1);
 
-        let closure: Box<FnBox() + Send> = Box::new(move || {
+        let closure: Box<FnOnce() + Send> = Box::new(move || {
             self.debug.assert_on_originating_thread();
             let u = f(&self.inner.item);
             tx.send(u).unwrap();
         });
 
-        // `closure` contains references, but IsolationRunner expects an FnBox
+        // `closure` contains references, but IsolationRunner expects an FnOnce
         // that is 'static. We're using a channel to block until after `f` has been
         // called, so any references it contains will be alive as long as they need
         // to be. The borrow checker can't know that (the channels are purely a
         // runtime thing), so we'll use mem::transmute to force `closure` to *look*
-        // like a 'static FnBox.
+        // like a 'static FnOnce.
         //
         // This is safe because the runner can only call closure once, and we won't
         // return until after that call finishes.
-        let closure: Box<FnBox() + Send + 'static> = unsafe { mem::transmute(closure) };
+        let closure: Box<FnOnce() + Send + 'static> = unsafe { mem::transmute(closure) };
         self.inner.runner.run_on_owning_thread(closure);
 
         // Memory safety of the above closure relies on this recv() blocking until
@@ -270,7 +269,7 @@ mod test {
     use std::thread;
     use std::sync::{Arc, Barrier, Mutex};
     use std::sync::mpsc::{channel, Sender};
-    use std::boxed::FnBox;
+    use std::ops::FnOnce;
 
     use super::{IsolationRunner, ThreadIsolated};
 
@@ -279,11 +278,11 @@ mod test {
         // Create an isolation runner that uses channels to send boxed functions
         // back to the main thread for it to run.
         struct Runner {
-            tx: Mutex<Sender<Box<FnBox() + Send>>>,
+            tx: Mutex<Sender<Box<FnOnce() + Send>>>,
         }
 
         impl IsolationRunner for Runner {
-            fn run_on_owning_thread(&self, boxed: Box<FnBox() + Send>) {
+            fn run_on_owning_thread(&self, boxed: Box<FnOnce() + Send>) {
                 let guard = self.tx.lock().unwrap();
                 guard.send(boxed).unwrap();
             }
@@ -352,13 +351,13 @@ mod test {
     #[cfg(debug_assertions)]
     mod debug_tests {
         use std::thread;
-        use std::boxed::FnBox;
+        use std::ops::FnOnce;
         use {IsolationRunner, ThreadIsolated};
 
         struct UnsafeNoopRunner;
 
         impl IsolationRunner for UnsafeNoopRunner {
-            fn run_on_owning_thread(&self, f: Box<FnBox() + Send>) {
+            fn run_on_owning_thread(&self, f: Box<FnOnce() + Send>) {
                 f()
             }
         }
